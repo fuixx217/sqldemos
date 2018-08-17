@@ -41,7 +41,7 @@ namespace AlwaysEncrypted_Performance
             }
         }
 
-        private enum EncryptOptions { None=0, ConnectionStringOnly=1, EncryptedValues=2 }
+        private enum EncryptOptions { None = 0, ConnectionStringOnly = 1, EncryptedValues = 2 }
 
         private static TestParameters ParseArguments(string[] args)
         {
@@ -164,25 +164,38 @@ namespace AlwaysEncrypted_Performance
             };
 
 
-            //List<Tuple<String, DateTime>> testResults = new List<Tuple<String, DateTime>>();
+            List<Tuple<String, DateTime, DateTime>> testResults = new List<Tuple<String, DateTime, DateTime>>();
 
             using (SqlConnection masterConnection = new SqlConnection(connStringBuilder.ConnectionString))
             {
+                Tuple<DateTime, DateTime> testResult;
                 masterConnection.Open();
                 PrepareDatabase(masterConnection);
                 PreTest(masterConnection);
 
                 // Start multiple test runs, capture duration of each
 
-                ExecuteTest(testParms, EncryptOptions.EncryptedValues);
+                testResult = ExecuteTest(testParms, EncryptOptions.EncryptedValues);
+                testResults.Add(Tuple.Create("EncryptedValues", testResult.Item1, testResult.Item2));
 
-                //ExecuteTest(testParms, EncryptOptions.ConnectionStringOnly);
+                testResult = ExecuteTest(testParms, EncryptOptions.ConnectionStringOnly);
+                testResults.Add(Tuple.Create("ConnectionStringOnly", testResult.Item1, testResult.Item2));
 
-                ExecuteTest(testParms, EncryptOptions.None);
-
+                testResult = ExecuteTest(testParms, EncryptOptions.None);
+                testResults.Add(Tuple.Create("NoEncryption", testResult.Item1, testResult.Item2));
 
                 PostTest(masterConnection);
 
+            }
+
+            foreach (Tuple<String, DateTime, DateTime> testResult in testResults)
+            {
+                TimeSpan testDuration = testResult.Item3 - testResult.Item2;
+                Int32 rowsPerSecond = (int)Math.Floor(testParms.ExecutionCount * testParms.ThreadCount / testDuration.TotalSeconds);
+                Console.WriteLine(String.Format(
+                    "Test {0} began at {1} and completed at {2}. Duration: {3} minutes, {4} seconds. Rows per second: {5}"
+                    , testResult.Item1, testResult.Item2, testResult.Item3, Math.Floor(testDuration.TotalMinutes), testDuration.Seconds, rowsPerSecond
+                ));
             }
 
             //System.Threading.Thread.Sleep(30000);
@@ -270,8 +283,11 @@ ELSE SELECT 0 AS [keys_are_setup]
             }
         }
 
-        static void ExecuteTest(TestParameters testParms, EncryptOptions encryptionOptions)
+        static Tuple<DateTime, DateTime> ExecuteTest(TestParameters testParms, EncryptOptions encryptionOptions)
         {
+            DateTime startTime = DateTime.Now;
+            DateTime endTime;
+
             Task[] taskList = new Task[testParms.ThreadCount];
             for (int i = 0; i < testParms.ThreadCount; i++)
             {
@@ -279,6 +295,10 @@ ELSE SELECT 0 AS [keys_are_setup]
             }
 
             Task.WaitAll(taskList);
+
+            endTime = DateTime.Now;
+
+            return new Tuple<DateTime, DateTime>(startTime, endTime);
         }
 
         static void ExecuteTestTask(TestParameters testParms, EncryptOptions encryptionOptions)
@@ -376,7 +396,7 @@ ELSE SELECT 0 AS [keys_are_setup]
                         paramSSN.Value = @"123-45-6789";
                         paramFirstName.Value = @"Foo";
                         paramLastName.Value = @"Bar";
-                        paramBirthDate.Value = new DateTime(2008, 08, 16);
+                        paramBirthDate.Value = new DateTime(2018, 08, 16);
 
                         cmd.ExecuteNonQuery();
                     }
