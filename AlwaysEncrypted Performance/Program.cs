@@ -10,8 +10,12 @@ namespace AlwaysEncrypted_Performance
 {
     class Program
     {
-        private const Int32 defaultExecutionCount = 10;
-        private const Int32 defaultThreadCount = 10;
+        private const Int32 defaultExecutionCount = 1000;
+        private const Int32 defaultThreadCount = 4;
+        private const Int32 defaultBatchSize = 1000;
+
+        private const string encryptedTableName = "[dbo].[Patients_Encrypted]";
+        private const string unencryptedTableName = "[dbo].[Patients_Unencrypted]";
 
         private static void PrintUsageAndExit()
         {
@@ -25,15 +29,19 @@ namespace AlwaysEncrypted_Performance
             public readonly string Database;
             public readonly UInt32 ExecutionCount;
             public readonly UInt32 ThreadCount;
+            public readonly UInt32 BatchSize;
 
-            public TestParameters(string serverInstance, string database, UInt32 executionCount, UInt32 threadCount)
+            public TestParameters(string serverInstance, string database, UInt32 executionCount, UInt32 threadCount, UInt32 batchSize)
             {
                 ServerInstance = serverInstance;
                 Database = database;
                 ExecutionCount = executionCount;
                 ThreadCount = threadCount;
+                BatchSize = batchSize;
             }
         }
+
+        private enum EncryptOptions { None=0, ConnectionStringOnly=1, EncryptedValues=2 }
 
         private static TestParameters ParseArguments(string[] args)
         {
@@ -41,7 +49,7 @@ namespace AlwaysEncrypted_Performance
             //TestParameters results = new TestParameters();
             TestParameters results;
             string serverinstance, database;
-            UInt32 executioncount, threadcount;
+            UInt32 executionCount, threadCount, batchSize;
 
             if (argslist.Count == 0 || argslist[0] == "help")
             {
@@ -87,18 +95,18 @@ namespace AlwaysEncrypted_Performance
 
             if (argslist.Count > 0)
             {
-                if (false == UInt32.TryParse(argslist[0], out executioncount))
+                if (false == UInt32.TryParse(argslist[0], out executionCount))
                 {
                     throw new System.ArgumentException("ExecutionCount could not be parsed", "ExecutionCount");
                 }
                 argslist.RemoveAt(0);
 
-                if (executioncount == 0)
+                if (executionCount == 0)
                 {
                     throw new System.ArgumentException("ExecutionCount cannot be zero", "executioncount");
                 }
 
-                if (executioncount < 0)
+                if (executionCount < 0)
                 {
                     throw new System.ArgumentException("ExecutionCount cannot be negative", "executioncount");
                 }
@@ -106,34 +114,39 @@ namespace AlwaysEncrypted_Performance
             }
             else
             {
-                executioncount = defaultExecutionCount;
+                executionCount = defaultExecutionCount;
             }
 
             if (argslist.Count > 0)
             {
-                if (false == UInt32.TryParse(argslist[0], out threadcount))
+                if (false == UInt32.TryParse(argslist[0], out threadCount))
                 {
                     throw new System.ArgumentException("threadcount could not be parsed", "threadcount");
                 }
                 argslist.RemoveAt(0);
 
-                if (threadcount == 0)
+                if (threadCount == 0)
                 {
                     throw new System.ArgumentException("threadcount cannot be zero", "threadcount");
                 }
 
-                if (threadcount < 0)
+                if (threadCount < 0)
                 {
                     throw new System.ArgumentException("threadcount cannot be negative", "threadcount");
                 }
 
+                //TODO: enforce a maximum threadcount, possibly compare to max connection pool size
+
             }
             else
             {
-                threadcount = defaultThreadCount;
+                threadCount = defaultThreadCount;
             }
 
-            results = new TestParameters(serverInstance: serverinstance, database: database, executionCount: executioncount, threadCount: threadcount);
+            //FIXME
+            batchSize = defaultBatchSize;
+
+            results = new TestParameters(serverInstance: serverinstance, database: database, executionCount: executionCount, threadCount: threadCount, batchSize: batchSize);
 
             return results;
         }
@@ -149,6 +162,7 @@ namespace AlwaysEncrypted_Performance
             connStringBuilder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
 
 
+            //List<Tuple<String, DateTime>> testResults = new List<Tuple<String, DateTime>>();
 
             using (SqlConnection masterConnection = new SqlConnection(connStringBuilder.ConnectionString))
             {
@@ -156,13 +170,22 @@ namespace AlwaysEncrypted_Performance
                 PrepareDatabase(masterConnection);
                 PreTest(masterConnection);
 
-                ExecuteTest(testParms);
+                // Start multiple test runs, capture duration of each
 
-                System.Threading.Thread.Sleep(1000);
+                ExecuteTest(testParms, EncryptOptions.EncryptedValues);
+
+                //ExecuteTest(testParms, EncryptOptions.ConnectionStringOnly);
+
+                ExecuteTest(testParms, EncryptOptions.None);
+
 
                 PostTest(masterConnection);
 
             }
+
+            //System.Threading.Thread.Sleep(30000);
+            Console.WriteLine("Press Enter to close this program.");
+            Console.ReadLine();
 
             Environment.Exit(0);
 
@@ -170,26 +193,45 @@ namespace AlwaysEncrypted_Performance
 
         static void PrepareDatabase(SqlConnection dbconnection)
         {
-
-        }
-
-        static void PreTest(SqlConnection dbconnection)
-        {
-            Int32 rowcount;
-
             using (SqlCommand cmd = dbconnection.CreateCommand())
             {
-                cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM [dbo].[Patients]";
+                // Verify server supports AlwaysEncrypted
+                Int32 serverMajorVersion;
+                Int32.TryParse(dbconnection.ServerVersion.Split('.')[0], out serverMajorVersion);
+
+                if (serverMajorVersion < 13)
+                    throw new NotSupportedException(String.Format("Specified server's major version does not support AlwaysEncrypted: {0}", serverMajorVersion));
+
+
+                // Verify keys are setup
+                cmd.CommandText = @"
+IF EXISTS(
+	SELECT 1 
+	FROM sys.column_master_keys cmk
+		INNER JOIN sys.column_encryption_key_values cekv
+			ON cmk.column_master_key_id = cekv.column_master_key_id
+		INNER JOIN sys.column_encryption_keys cek
+			ON cekv.column_encryption_key_id = cek.column_encryption_key_id
+	WHERE
+		cmk.name = 'CMK1'
+		AND cek.name = 'CEK1'
+) SELECT 1 AS [keys_are_setup]
+ELSE SELECT 0 AS [keys_are_setup]
+";
+                int keys_are_setup;
 
                 try
                 {
-                    rowcount = (Int32)cmd.ExecuteScalar();
-                    Console.WriteLine(String.Format("Rows in Patients table at start: {0}", rowcount));
+                    keys_are_setup = (Int32)cmd.ExecuteScalar();
 
-                    if (rowcount != 0)
+                    if (keys_are_setup == 0)
                     {
-                        cmd.CommandText = @"TRUNCATE TABLE [dbo].[Patients];";
-                        cmd.ExecuteNonQuery();
+                        throw new NotImplementedException(String.Format("Generating the Column Master Key and Column Encryption Key is not currently supported."));
+                    }
+                    else
+                    {
+                        CreateTables(dbconnection);
+                        ResetTables(dbconnection);
                     }
                 }
                 catch (SqlException ex)
@@ -200,24 +242,65 @@ namespace AlwaysEncrypted_Performance
             }
         }
 
-        static void ExecuteTest(TestParameters testParms)
+        static void PreTest(SqlConnection dbconnection)
+        {
+            Int32 rowcount;
+
+            using (SqlCommand cmd = dbconnection.CreateCommand())
+            {
+
+                try
+                {
+                    cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM " + encryptedTableName;
+                    rowcount = (Int32)cmd.ExecuteScalar();
+                    Console.WriteLine(String.Format("Rows in Patients_Encrypted table at start: {0}", rowcount));
+
+                    cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM " + unencryptedTableName;
+                    rowcount = (Int32)cmd.ExecuteScalar();
+                    Console.WriteLine(String.Format("Rows in Patients_Unencrypted table at start: {0}", rowcount));
+
+                }
+                catch (SqlException ex)
+                {
+                    Console.WriteLine("Encountered SQL exception: {0}", ex.ToString());
+                    Environment.Exit(1);
+                }
+            }
+        }
+
+        static void ExecuteTest(TestParameters testParms, EncryptOptions encryptionOptions)
         {
             Task[] taskList = new Task[testParms.ThreadCount];
             for (int i = 0; i < testParms.ThreadCount; i++)
             {
-                taskList[i] = Task.Run(() => ExecuteTestTask(testParms));
+                taskList[i] = Task.Run(() => ExecuteTestTask(testParms, encryptionOptions));
             }
 
             Task.WaitAll(taskList);
         }
 
-        static void ExecuteTestTask(TestParameters testParms)
+        static void ExecuteTestTask(TestParameters testParms, EncryptOptions encryptionOptions)
         {
             SqlConnectionStringBuilder connStringBuilder = new SqlConnectionStringBuilder();
             connStringBuilder.DataSource = "localhost";
             connStringBuilder.InitialCatalog = "aeperf";
             connStringBuilder.IntegratedSecurity = true;
-            connStringBuilder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
+
+            switch (encryptionOptions)
+            {
+                case EncryptOptions.EncryptedValues:
+                case EncryptOptions.ConnectionStringOnly:
+                    connStringBuilder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
+                    break;
+
+                case EncryptOptions.None:
+                    connStringBuilder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Disabled;
+                    break;
+
+                default:
+                    throw new NotImplementedException(String.Format("Provided EncryptOptions value is not implemeneted: {0}", encryptionOptions));
+            }
+
 
             connStringBuilder.MinPoolSize = (int)testParms.ThreadCount;
             //connStringBuilder.MaxPoolSize = (int)testParms.ThreadCount;
@@ -228,7 +311,21 @@ namespace AlwaysEncrypted_Performance
 
                 using (SqlCommand cmd = dbConnection.CreateCommand())
                 {
-                    cmd.CommandText = @"INSERT dbo.Patients (SSN, FirstName, LastName, BirthDate) VALUES (@SSN, @FirstName, @LastName, @BirthDate);";
+                    switch (encryptionOptions)
+                    {
+                        case EncryptOptions.EncryptedValues:
+                            cmd.CommandText = @"INSERT [dbo].[Patients_Encrypted] (SSN, FirstName, LastName, BirthDate) VALUES (@SSN, @FirstName, @LastName, @BirthDate);";
+                            break;
+
+                        case EncryptOptions.ConnectionStringOnly:
+                        case EncryptOptions.None:
+                            cmd.CommandText = @"INSERT [dbo].[Patients_Unencrypted] (SSN, FirstName, LastName, BirthDate) VALUES (@SSN, @FirstName, @LastName, @BirthDate);";
+                            break;
+
+                        default:
+                            throw new NotImplementedException(String.Format("Provided EncryptOptions value is not implemeneted: {0}", encryptionOptions));
+                    }
+                    
 
                     SqlParameter paramSSN, paramFirstName, paramLastName, paramBirthDate;
 
@@ -279,18 +376,89 @@ namespace AlwaysEncrypted_Performance
 
             using (SqlCommand cmd = dbconnection.CreateCommand())
             {
-                cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM [dbo].[Patients]";
 
                 try
                 {
+                    cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM " + encryptedTableName;
                     rowcount = (Int32)cmd.ExecuteScalar();
-                    Console.WriteLine(String.Format("Rows in Patients table at end: {0}", rowcount));
+                    Console.WriteLine(String.Format("Rows in Patients_Encrypted table at end: {0}", rowcount));
+
+                    cmd.CommandText = @"SELECT COUNT(*) AS [RowCount] FROM " + unencryptedTableName;
+                    rowcount = (Int32)cmd.ExecuteScalar();
+                    Console.WriteLine(String.Format("Rows in Patients_Unencrypted table at end: {0}", rowcount));
                 }
                 catch (SqlException ex)
                 {
                     Console.WriteLine("Encountered SQL exception: {0}", ex.ToString());
-                    Environment.Exit(1);
+                    Environment.Exit(2);
                 }
+            }
+        }
+
+        private static void CreateTables(SqlConnection dbconnection)
+        {
+            using (SqlCommand cmd = dbconnection.CreateCommand())
+            {
+                //NOTE: Accepts the default filegroup when creating the table and index
+                //NOTE: Does not verify if the existing table has matching schema
+
+                //Create the Encrypted table
+                cmd.CommandText = @"
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+
+IF (SELECT OBJECT_ID ('[dbo].[Patients_Encrypted]')) IS NULL
+BEGIN;
+	CREATE TABLE [dbo].[Patients_Encrypted] (
+		[PatientId] [int] IDENTITY(1,1) NOT NULL,
+		[SSN] [char](11) COLLATE Latin1_General_BIN2 ENCRYPTED WITH (COLUMN_ENCRYPTION_KEY = [CEK1], ENCRYPTION_TYPE = Deterministic, ALGORITHM = 'AEAD_AES_256_CBC_HMAC_SHA_256') NOT NULL,
+		[FirstName] [nvarchar](50) NULL,
+		[LastName] [nvarchar](50) NULL,
+		[BirthDate] [date] ENCRYPTED WITH (COLUMN_ENCRYPTION_KEY = [CEK1], ENCRYPTION_TYPE = Randomized, ALGORITHM = 'AEAD_AES_256_CBC_HMAC_SHA_256') NOT NULL,
+		PRIMARY KEY CLUSTERED 
+		(
+			[PatientId] ASC
+		) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
+	)
+END;
+";
+
+                cmd.ExecuteNonQuery();
+
+                //Create the Unencrypted table
+                cmd.CommandText = @"
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+
+IF (SELECT OBJECT_ID ('[dbo].[Patients_Unencrypted]')) IS NULL
+BEGIN;
+	CREATE TABLE [dbo].[Patients_Unencrypted] (
+		[PatientId] [int] IDENTITY(1,1) NOT NULL,
+		[SSN] [char](11) COLLATE Latin1_General_BIN2 NOT NULL,
+		[FirstName] [nvarchar](50) NULL,
+		[LastName] [nvarchar](50) NULL,
+		[BirthDate] [date] NOT NULL,
+		PRIMARY KEY CLUSTERED 
+		(
+			[PatientId] ASC
+		) WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON)
+	)
+END;
+";
+
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private static void ResetTables(SqlConnection dbconnection)
+        {
+            using (SqlCommand cmd = dbconnection.CreateCommand())
+            {
+                cmd.CommandText = @"
+TRUNCATE TABLE [dbo].[Patients_Unencrypted];
+TRUNCATE TABLE [dbo].[Patients_Encrypted];
+";
+                cmd.ExecuteNonQuery();
             }
         }
     }
