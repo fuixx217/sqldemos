@@ -174,13 +174,15 @@ namespace AlwaysEncrypted_Performance
                 PreTest(masterConnection);
 
                 // Start multiple test runs, capture duration of each
-
+                ResetTables(masterConnection);
                 testResult = ExecuteTest(testParms, EncryptOptions.EncryptedValues);
                 testResults.Add(Tuple.Create("EncryptedValues", testResult.Item1, testResult.Item2));
 
+                ResetTables(masterConnection);
                 testResult = ExecuteTest(testParms, EncryptOptions.ConnectionStringOnly);
                 testResults.Add(Tuple.Create("ConnectionStringOnly", testResult.Item1, testResult.Item2));
 
+                ResetTables(masterConnection);
                 testResult = ExecuteTest(testParms, EncryptOptions.None);
                 testResults.Add(Tuple.Create("NoEncryption", testResult.Item1, testResult.Item2));
 
@@ -303,6 +305,14 @@ ELSE SELECT 0 AS [keys_are_setup]
 
         static void ExecuteTestTask(TestParameters testParms, EncryptOptions encryptionOptions)
         {
+            //TODO: Parameterize randomSeed into testParams
+            //TODO: Default to randomize by timestamp (non-deterministic)
+            int randomSeed = 12345;
+
+            //NOTE: This makes each test thread produce the same, deterministic set of rows
+            // This makes each test less realistic but more precisely comparable
+
+
             SqlConnectionStringBuilder connStringBuilder = new SqlConnectionStringBuilder
             {
                 DataSource = "localhost",
@@ -332,6 +342,10 @@ ELSE SELECT 0 AS [keys_are_setup]
             using (SqlConnection dbConnection = new SqlConnection(connStringBuilder.ConnectionString))
             {
                 dbConnection.Open();
+
+                Random random = new Random(randomSeed);
+
+                DateTime birthDateRangeEnd = DateTime.Now;
 
                 using (SqlCommand cmd = dbConnection.CreateCommand())
                 {
@@ -393,10 +407,10 @@ ELSE SELECT 0 AS [keys_are_setup]
                             cmd.Transaction = transaction;
                         }
 
-                        paramSSN.Value = @"123-45-6789";
-                        paramFirstName.Value = @"Foo";
-                        paramLastName.Value = @"Bar";
-                        paramBirthDate.Value = new DateTime(2018, 08, 16);
+                        paramSSN.Value = random.Next(1000000000).ToString("000-00-0000");
+                        paramFirstName.Value = String.Format("First{0}{1}{2}", (char)random.Next(97, 122), (char)random.Next(97, 122), (char)random.Next(97, 122));
+                        paramLastName.Value = String.Format("Last{0}{1}{2}", (char)random.Next(97, 122), (char)random.Next(97, 122), (char)random.Next(97, 122));
+                        paramBirthDate.Value = birthDateRangeEnd.AddDays(0 - random.Next(365*70));
 
                         cmd.ExecuteNonQuery();
                     }
